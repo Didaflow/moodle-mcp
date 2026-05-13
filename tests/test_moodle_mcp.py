@@ -263,6 +263,35 @@ class TestResponseFormats:
         assert parsed["documents"][0]["id"] == "moodle://moodle.test.it/course/42"
         assert parsed["documents"][0]["content"] == "Intro"
 
+    async def test_courses_search_uses_search_courses_ws(self, fake_client):
+        fake_client.response = {
+            "total": 42,
+            "courses": [{"id": 1, "fullname": "ML", "shortname": "ML25", "summary": ""}],
+        }
+        out = await moodle_list_courses(ListCoursesInput(
+            search="ml", limit=10, offset=20,
+            response_format=ResponseFormat.JSON,
+        ))
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "core_course_search_courses"
+        assert params["criterianame"] == "search"
+        assert params["criteriavalue"] == "ml"
+        assert params["perpage"] == 10
+        assert params["page"] == 2  # offset 20 // limit 10
+        parsed = json.loads(out)
+        assert parsed["pagination"]["total"] == 42
+        assert parsed["pagination"]["offset"] == 20
+        assert parsed["pagination"]["has_more"] is True
+        assert parsed["pagination"]["next_offset"] == 21
+
+    async def test_courses_no_search_uses_get_courses_ws(self, fake_client):
+        fake_client.response = [
+            {"id": 1, "fullname": "ML", "shortname": "ML25", "summary": ""},
+        ]
+        await moodle_list_courses(ListCoursesInput())
+        wsfunc, _ = fake_client.calls[-1]
+        assert wsfunc == "core_course_get_courses"
+
     async def test_course_contents_rag_splits_section_and_modules(self, fake_client):
         fake_client.response = [{
             "id": 100, "section": 1, "name": "Week 1", "summary": "",

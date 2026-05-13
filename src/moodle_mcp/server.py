@@ -145,27 +145,43 @@ def _render_courses_md(courses: list[dict], pagination: dict | None) -> str:
 async def moodle_list_courses(params: ListCoursesInput) -> str:
     """List all courses on the Moodle site, optionally filtered by a search substring.
 
-    Calls `core_course_get_courses` and slices client-side. Use this to discover
-    course IDs before fetching contents, assignments, forums, or enrolled users.
+    When `search` is provided, calls `core_course_search_courses` (server-side,
+    paginated). Otherwise calls `core_course_get_courses` and paginates client-side.
+    Use this to discover course IDs before fetching contents, assignments, forums,
+    or enrolled users.
 
     Returns:
         Markdown summary or JSON payload of courses with id, fullname, shortname,
         category, start/end dates, and summary.
     """
     try:
-        data = await _get_client().call("core_course_get_courses")
-        # The site-level course id=1 is the front page; usually noise. Keep it
-        # but mark it visibly via its shortname so the LLM can ignore it.
-        courses: list[dict] = data or []
-
         if params.search:
-            q = params.search.lower()
-            courses = [
-                c for c in courses
-                if q in (c.get("fullname", "") or "").lower()
-                or q in (c.get("shortname", "") or "").lower()
-            ]
+            page_num = params.offset // params.limit
+            data = await _get_client().call(
+                "core_course_search_courses",
+                {
+                    "criterianame": "search",
+                    "criteriavalue": params.search,
+                    "page": page_num,
+                    "perpage": params.limit,
+                },
+            )
+            courses: list[dict] = (data or {}).get("courses", []) if isinstance(data, dict) else []
+            total = (data or {}).get("total", len(courses)) if isinstance(data, dict) else len(courses)
+            has_more = (params.offset + len(courses)) < total
+            pag = {
+                "total": total,
+                "count": len(courses),
+                "offset": params.offset,
+                "has_more": has_more,
+                "next_offset": params.offset + len(courses) if has_more else None,
+            }
+            if params.response_format == ResponseFormat.RAG:
+                return build_rag_response(courses_to_docs(courses, _site_host()))
+            return as_response(courses, params.response_format, _render_courses_md, pag)
 
+        data = await _get_client().call("core_course_get_courses")
+        courses = data or []
         page, pag = paginate(courses, params.offset, params.limit)
 
         if params.response_format == ResponseFormat.RAG:
