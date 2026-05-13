@@ -21,6 +21,7 @@ import pytest
 os.environ.setdefault("MOODLE_URL", "https://moodle.test.it")
 os.environ.setdefault("MOODLE_TOKEN", "test_token")
 
+from moodle_mcp.client import MoodleAPIError
 from moodle_mcp.ingest import (
     DOC_ID_NAMESPACE,
     Embedder,  # noqa: F401  (re-exported for documentation purposes)
@@ -30,6 +31,7 @@ from moodle_mcp.ingest import (
     MoodleWalker,
     QdrantSink,
     VALID_DOMAINS,
+    _FUNCTION_UNAVAILABLE_CODES,
     _parse_args,
     _validate_only,
     doc_uuid,
@@ -43,14 +45,21 @@ from moodle_mcp.ingest import (
 
 
 class FakeMoodleClient:
-    """Returns canned responses keyed by wsfunction. Records every call."""
+    """Returns canned responses keyed by wsfunction. Records every call.
+
+    To simulate a Moodle WS denial, set `errors[wsfunction]` to a MoodleAPIError
+    — the next call to that function will raise it.
+    """
 
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
         self.responses: dict[str, object] = {}
+        self.errors: dict[str, MoodleAPIError] = {}
 
     async def call(self, wsfunction, params=None):
         self.calls.append((wsfunction, dict(params or {})))
+        if wsfunction in self.errors:
+            raise self.errors[wsfunction]
         return self.responses.get(wsfunction)
 
 
@@ -214,6 +223,80 @@ class TestWalker:
         contents_calls = [c for c in client.calls if c[0] == "core_course_get_contents"]
         assert len(contents_calls) == 3
 
+    async def test_accessexception_on_categories_does_not_abort(self):
+        """If categories WS is denied, walker should skip it and continue to courses."""
+        client = FakeMoodleClient()
+        client.errors["core_course_get_categories"] = MoodleAPIError(
+            "accessexception", "user not in authorized users"
+        )
+        client.responses["core_course_get_courses"] = [
+            {"id": 1, "fullname": "ML", "shortname": "ML25", "summary": ""},
+        ]
+        client.responses["core_course_get_contents"] = []
+        client.responses["mod_forum_get_forums_by_courses"] = []
+        client.responses["mod_assign_get_assignments"] = {"courses": []}
+        client.responses["mod_chat_get_chats_by_courses"] = {"chats": []}
+
+        walker = MoodleWalker(client, host="h")
+        docs = [d async for d in walker.walk()]
+
+        # Categories tried once and failed → recorded as unavailable
+        assert walker.unavailable == {"core_course_get_categories": "accessexception"}
+        # But the walk continued: course doc is present
+        assert any(d["type"] == "course" for d in docs)
+        # And courses ws was actually called
+        assert any(c[0] == "core_course_get_courses" for c in client.calls)
+
+    async def test_unavailable_function_not_retried_within_same_walk(self):
+        """If a per-course endpoint is denied for course 1, walker shouldn't keep retrying it for course 2…N."""
+        client = FakeMoodleClient()
+        client.responses["core_course_get_categories"] = []
+        client.responses["core_course_get_courses"] = [
+            {"id": 1, "fullname": "C1", "shortname": "C1", "summary": ""},
+            {"id": 2, "fullname": "C2", "shortname": "C2", "summary": ""},
+            {"id": 3, "fullname": "C3", "shortname": "C3", "summary": ""},
+        ]
+        # Block course-contents entirely
+        client.errors["core_course_get_contents"] = MoodleAPIError(
+            "nopermissions", "role lacks capability"
+        )
+        client.responses["mod_forum_get_forums_by_courses"] = []
+        client.responses["mod_assign_get_assignments"] = {"courses": []}
+        client.responses["mod_chat_get_chats_by_courses"] = {"chats": []}
+
+        walker = MoodleWalker(client, host="h")
+        async for _ in walker.walk():
+            pass
+
+        # Called exactly once before being cached as unavailable
+        contents_calls = [c for c in client.calls if c[0] == "core_course_get_contents"]
+        assert len(contents_calls) == 1
+        assert walker.unavailable == {"core_course_get_contents": "nopermissions"}
+
+    async def test_non_access_errors_still_abort(self):
+        """invalidtoken / network errors should propagate — only function-availability is tolerant."""
+        client = FakeMoodleClient()
+        client.errors["core_course_get_categories"] = MoodleAPIError(
+            "invalidtoken", "token bad"
+        )
+        walker = MoodleWalker(client, host="h")
+        with pytest.raises(MoodleAPIError) as exc:
+            async for _ in walker.walk():
+                pass
+        assert exc.value.errorcode == "invalidtoken"
+
+    async def test_all_unavailable_codes_recognised(self):
+        for code in _FUNCTION_UNAVAILABLE_CODES:
+            client = FakeMoodleClient()
+            client.errors["core_course_get_categories"] = MoodleAPIError(code, "denied")
+            client.responses["core_course_get_courses"] = []
+            walker = MoodleWalker(client, host="h", only={"categories"})
+            async for _ in walker.walk():
+                pass
+            assert walker.unavailable == {"core_course_get_categories": code}, (
+                f"code {code!r} should be tolerated but wasn't"
+            )
+
     async def test_since_forces_timemodified_desc_on_discussions(self):
         client = FakeMoodleClient()
         client.responses["core_course_get_categories"] = []
@@ -295,6 +378,31 @@ class TestIngester:
         # Same doc.id (moodle://h/course/1) → same Qdrant point UUID, every run.
         assert first_uuid == second_uuid
 
+    async def test_report_propagates_walker_unavailable(self):
+        client = FakeMoodleClient()
+        client.errors["core_course_get_categories"] = MoodleAPIError(
+            "accessexception", "denied"
+        )
+        client.responses["core_course_get_courses"] = [
+            {"id": 1, "fullname": "ML", "shortname": "ML25", "summary": ""},
+        ]
+        client.responses["core_course_get_contents"] = []
+        client.responses["mod_forum_get_forums_by_courses"] = []
+        client.responses["mod_assign_get_assignments"] = {"courses": []}
+        client.responses["mod_chat_get_chats_by_courses"] = {"chats": []}
+        walker = MoodleWalker(client, host="h")
+        embedder = FakeEmbedder()
+        sink = FakeQdrantSink()
+        ingester = Ingester(
+            tenant="bbs", walker=walker, embedder=embedder, sink=sink, batch_size=10,
+        )
+        report = await ingester.run()
+        assert report.unavailable == {"core_course_get_categories": "accessexception"}
+        # report.format() mentions the unavailable section
+        formatted = report.format()
+        assert "unavailable wsfunctions" in formatted
+        assert "core_course_get_categories" in formatted
+
     async def test_only_courses(self):
         ingester, client, _, _ = await self._build(only={"courses"})
         report = await ingester.run()
@@ -311,6 +419,9 @@ class TestIngester:
 
 class TestMainValidation:
     def test_missing_openai_key_exits_2(self, monkeypatch, capsys):
+        # Neutralise dotenv so a developer's local .env doesn't repopulate
+        # the env vars we're deliberately stripping below.
+        monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
         # Strip all relevant vars; tenant arg is the only thing supplied
         for k in ("MOODLE_URL", "MOODLE_TOKEN", "QDRANT_URL",
                   "QDRANT_API_KEY", "OPENAI_API_KEY"):
@@ -325,6 +436,7 @@ class TestMainValidation:
 
     def test_dry_run_skips_qdrant_env_requirement(self, monkeypatch):
         """dry-run shouldn't need QDRANT_URL / QDRANT_API_KEY to be present."""
+        monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
         monkeypatch.setenv("MOODLE_URL", "https://moodle.test.it")
         monkeypatch.setenv("MOODLE_TOKEN", "x")
         monkeypatch.delenv("QDRANT_URL", raising=False)

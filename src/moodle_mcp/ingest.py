@@ -30,7 +30,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Iterator, Protocol
 
-from .client import MoodleClient, MoodleAPIError
+from .client import MoodleClient, MoodleAPIError, format_error
+
+# Moodle WS errors that mean "this function isn't available to your token in
+# this service" — different from token/auth errors. We skip the offending call
+# and continue the walk; the alternative (abort on first failure) is wrong when
+# the BBS / UniBo service exposes only a subset of the 19 tools.
+_FUNCTION_UNAVAILABLE_CODES = frozenset({
+    "accessexception",                          # user not in service authorized users
+    "nopermissions",                            # role lacks capability
+    "servicerequireslogin",                     # function not added to service
+    "webservice_function_not_found_in_service", # legacy / older Moodle alias
+})
 from .rag import (
     Document,
     _host,
@@ -81,18 +92,27 @@ class IngestReport:
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
     by_type: dict[str, int] = field(default_factory=dict)
+    # wsfunction → errorcode for every call refused by the Moodle external service.
+    # Used to surface "this WS function isn't available to your token" without
+    # aborting the rest of the walk.
+    unavailable: dict[str, str] = field(default_factory=dict)
 
     def add(self, doc_type: str) -> None:
         self.by_type[doc_type] = self.by_type.get(doc_type, 0) + 1
 
     def format(self) -> str:
         types = ", ".join(f"{k}={v}" for k, v in sorted(self.by_type.items())) or "—"
-        return (
+        lines = [
             f"fetched={self.fetched} embedded={self.embedded} "
             f"upserted={self.upserted} skipped={self.skipped} "
-            f"errors={len(self.errors)}\n"
-            f"by_type: {types}"
-        )
+            f"errors={len(self.errors)} unavailable={len(self.unavailable)}",
+            f"by_type: {types}",
+        ]
+        if self.unavailable:
+            lines.append("unavailable wsfunctions (skipped, not in this service):")
+            for fn, code in sorted(self.unavailable.items()):
+                lines.append(f"  - {fn}  [{code}]")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +288,10 @@ class MoodleWalker:
         self._limit = limit
         # None = walk everything. Empty set is treated the same — defensive.
         self._only = only or None
+        # Functions that returned a "you can't call this" code at least once.
+        # Once a function is here, we stop trying it for the rest of the walk
+        # to avoid hammering Moodle with calls we know will fail.
+        self.unavailable: dict[str, str] = {}
 
     def _enabled(self, domain: str) -> bool:
         return self._only is None or domain in self._only
@@ -275,17 +299,35 @@ class MoodleWalker:
     def _cap(self, items: list[Any]) -> list[Any]:
         return items[: self._limit] if self._limit else items
 
+    async def _safe_call(self, wsfunction: str, params: dict[str, Any] | None = None) -> Any:
+        """Wrap MoodleClient.call with per-function access-denial tolerance.
+
+        Returns the response on success. Returns None and records the function
+        in `self.unavailable` on access-denial errors. Re-raises everything else
+        (network errors, token-level auth failures, malformed responses) so
+        genuine problems still abort the walk.
+        """
+        if wsfunction in self.unavailable:
+            return None  # already known unavailable; don't re-try this run
+        try:
+            return await self._client.call(wsfunction, params)
+        except MoodleAPIError as e:
+            if e.errorcode in _FUNCTION_UNAVAILABLE_CODES:
+                self.unavailable[wsfunction] = e.errorcode
+                return None
+            raise
+
     async def walk(self) -> AsyncIterator[Document]:
         # 1. Categories
         if self._enabled("categories"):
-            cats = await self._client.call("core_course_get_categories", {"addsubcategories": 1})
+            cats = await self._safe_call("core_course_get_categories", {"addsubcategories": 1})
             for doc in categories_to_docs(self._cap(cats or []), self._host):
                 yield doc
 
         # 2. Courses (full list, no search)
         all_courses: list[dict] = []
         if self._enabled("courses"):
-            courses_resp = await self._client.call("core_course_get_courses")
+            courses_resp = await self._safe_call("core_course_get_courses")
             all_courses = courses_resp or []
             for doc in courses_to_docs(self._cap(all_courses), self._host):
                 yield doc
@@ -294,7 +336,7 @@ class MoodleWalker:
             # when --only excludes courses themselves.
             if self._enabled("contents") or self._enabled("forums") or \
                self._enabled("assignments") or self._enabled("chats"):
-                courses_resp = await self._client.call("core_course_get_courses")
+                courses_resp = await self._safe_call("core_course_get_courses")
                 all_courses = courses_resp or []
 
         course_ids = [c["id"] for c in self._cap(all_courses) if c.get("id")]
@@ -302,14 +344,14 @@ class MoodleWalker:
         # 3. Per-course drilldowns
         for course_id in course_ids:
             if self._enabled("contents"):
-                sections = await self._client.call(
+                sections = await self._safe_call(
                     "core_course_get_contents", {"courseid": course_id}
                 ) or []
                 for doc in course_contents_to_docs(sections, course_id, self._host):
                     yield doc
 
             if self._enabled("forums") or self._enabled("discussions") or self._enabled("posts"):
-                forums_resp = await self._client.call(
+                forums_resp = await self._safe_call(
                     "mod_forum_get_forums_by_courses", {"courseids": [course_id]}
                 ) or []
                 if self._enabled("forums"):
@@ -331,7 +373,7 @@ class MoodleWalker:
                                 disc_id = d.get("discussion")
                                 if not disc_id:
                                     continue
-                                posts_resp = await self._client.call(
+                                posts_resp = await self._safe_call(
                                     "mod_forum_get_discussion_posts",
                                     {"discussionid": disc_id},
                                 )
@@ -340,7 +382,7 @@ class MoodleWalker:
                                     yield doc
 
             if self._enabled("assignments"):
-                a_resp = await self._client.call(
+                a_resp = await self._safe_call(
                     "mod_assign_get_assignments", {"courseids": [course_id]}
                 )
                 a_courses = a_resp.get("courses", []) if isinstance(a_resp, dict) else []
@@ -348,7 +390,7 @@ class MoodleWalker:
                     yield doc
 
             if self._enabled("chats") or self._enabled("sessions") or self._enabled("messages"):
-                c_resp = await self._client.call(
+                c_resp = await self._safe_call(
                     "mod_chat_get_chats_by_courses", {"courseids": [course_id]}
                 )
                 chats = c_resp.get("chats", []) if isinstance(c_resp, dict) else []
@@ -362,7 +404,7 @@ class MoodleWalker:
                         chat_id = chat.get("id")
                         if not chat_id:
                             continue
-                        s_resp = await self._client.call(
+                        s_resp = await self._safe_call(
                             "mod_chat_get_sessions",
                             {"chatid": chat_id, "groupid": 0, "showall": 1},
                         )
@@ -373,7 +415,7 @@ class MoodleWalker:
                                 end = sess.get("sessionend")
                                 if start is None or end is None:
                                     continue
-                                m_resp = await self._client.call(
+                                m_resp = await self._safe_call(
                                     "mod_chat_get_session_messages",
                                     {
                                         "chatid": chat_id,
@@ -399,7 +441,7 @@ class MoodleWalker:
         if self._since is not None:
             params["sortby"] = "timemodified"
             params["sortdirection"] = "DESC"
-        resp = await self._client.call("mod_forum_get_forum_discussions", params)
+        resp = await self._safe_call("mod_forum_get_forum_discussions", params)
         discussions = resp.get("discussions", []) if isinstance(resp, dict) else []
         if self._since is not None:
             out = []
@@ -454,6 +496,9 @@ class Ingester:
                 batch = []
         if batch:
             self._flush(batch, report)
+        # Propagate the walker's per-function denials into the report so the
+        # CLI can show the operator which wsfunctions were skipped.
+        report.unavailable = dict(self._walker.unavailable)
         return report
 
     def _flush(self, batch: list[Document], report: IngestReport) -> None:
@@ -598,7 +643,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = asyncio.run(ingester.run())
     except MoodleAPIError as e:
-        print(f"ERROR: Moodle API: [{e.errorcode}] {e.message}", file=sys.stderr)
+        # Pipe through format_error() so the operator gets the actionable
+        # hint (e.g. "ask admin to add user to authorized users list") rather
+        # than just the raw errorcode + localised message.
+        print(f"ERROR: {format_error(e)}", file=sys.stderr)
         return 1
     finally:
         state.close()
