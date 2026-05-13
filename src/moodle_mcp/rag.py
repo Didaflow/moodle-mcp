@@ -302,6 +302,30 @@ def posts_to_docs(posts: list[dict], discussion_id: int, host: str) -> list[Docu
     return docs
 
 
+def categories_to_docs(categories: list[dict], host: str) -> list[Document]:
+    docs: list[Document] = []
+    for c in categories:
+        cid = c.get("id")
+        if not cid:
+            continue
+        docs.append({
+            "id": make_doc_id(host, "category", cid),
+            "type": "category",
+            "title": c.get("name") or f"Category {cid}",
+            "content": strip_html(c.get("description", "")),
+            "metadata": {
+                "category_id": cid,
+                "parent_id": c.get("parent"),
+                "course_count": c.get("coursecount"),
+                "depth": c.get("depth"),
+                "path": c.get("path"),
+                "idnumber": c.get("idnumber"),
+                "visible": bool(c.get("visible", True)),
+            },
+        })
+    return docs
+
+
 def files_to_docs(files: list[dict], host: str) -> list[Document]:
     """One document per file. Content is empty — file bytes are fetched separately
     via `moodle_fetch_file_bytes`. Use fileurl from metadata as the doc identifier

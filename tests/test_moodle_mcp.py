@@ -26,6 +26,7 @@ from moodle_mcp.client import MoodleAPIError, MoodleConfigError, _flatten_params
 from moodle_mcp.formatting import ResponseFormat, strip_html
 from moodle_mcp.rag import (
     assignments_to_docs,
+    categories_to_docs,
     courses_to_docs,
     discussions_to_docs,
     files_to_docs,
@@ -38,6 +39,7 @@ from moodle_mcp.server import (
     GetDiscussionPostsInput,
     GetForumDiscussionsInput,
     ListAssignmentsInput,
+    ListCategoriesInput,
     ListCoursesInput,
     ListFilesInput,
     SearchUsersByCriteriaInput,
@@ -48,6 +50,7 @@ from moodle_mcp.server import (
     moodle_get_forum_discussions,
     moodle_get_assignments,
     moodle_get_users_by_field,
+    moodle_list_categories,
     moodle_list_courses,
     moodle_list_files,
     moodle_search_users,
@@ -190,6 +193,17 @@ class TestRagConverters:
         assert docs[0]["id"] == "moodle://host/assignment/100"
         assert docs[0]["metadata"]["course_id"] == 42
         assert docs[0]["metadata"]["due_date"] is not None  # converted to ISO
+
+    def test_categories_to_docs_strips_html(self):
+        docs = categories_to_docs(
+            [{"id": 7, "name": "ML", "parent": 1, "depth": 2,
+              "coursecount": 3, "path": "/1/7", "description": "<b>desc</b>"}],
+            "host",
+        )
+        assert docs[0]["type"] == "category"
+        assert docs[0]["content"] == "desc"
+        assert docs[0]["metadata"]["parent_id"] == 1
+        assert docs[0]["metadata"]["course_count"] == 3
 
     def test_files_to_docs_skips_dirs(self):
         docs = files_to_docs(
@@ -438,6 +452,47 @@ class TestToolErrorPropagation:
 
 
 @pytest.mark.asyncio
+class TestCategories:
+    async def test_no_name_search_passes_only_addsubcategories(self, fake_client):
+        fake_client.response = [
+            {"id": 1, "name": "Top", "parent": 0, "depth": 1, "coursecount": 5},
+        ]
+        await moodle_list_categories(ListCategoriesInput())
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "core_course_get_categories"
+        assert params["addsubcategories"] == 1
+        assert "criteria" not in params
+
+    async def test_name_search_passes_criteria(self, fake_client):
+        fake_client.response = []
+        await moodle_list_categories(ListCategoriesInput(
+            name_search="machine", include_subcategories=False,
+        ))
+        _, params = fake_client.calls[-1]
+        assert params["addsubcategories"] == 0
+        assert params["criteria"] == [{"key": "name", "value": "machine"}]
+
+    async def test_rag_emits_category_docs(self, fake_client):
+        fake_client.response = [
+            {"id": 7, "name": "ML", "parent": 1, "depth": 2,
+             "coursecount": 3, "path": "/1/7", "description": "<p>desc</p>"},
+        ]
+        out = await moodle_list_categories(ListCategoriesInput(
+            response_format=ResponseFormat.RAG,
+        ))
+        parsed = json.loads(out)
+        assert parsed["count"] == 1
+        doc = parsed["documents"][0]
+        assert doc["type"] == "category"
+        assert doc["content"] == "desc"  # HTML stripped
+        assert doc["metadata"]["category_id"] == 7
+        assert doc["metadata"]["parent_id"] == 1
+        assert doc["metadata"]["depth"] == 2
+        assert doc["metadata"]["path"] == "/1/7"
+        assert doc["metadata"]["course_count"] == 3
+
+
+@pytest.mark.asyncio
 class TestFiles:
     async def test_list_files_calls_core_files_get_files(self, fake_client):
         fake_client.response = {"files": [
@@ -619,6 +674,7 @@ async def test_all_tools_registered():
         "moodle_get_upcoming_events",
         "moodle_list_files",
         "moodle_fetch_file_bytes",
+        "moodle_list_categories",
     }
     assert expected.issubset(names)
 

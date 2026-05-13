@@ -38,6 +38,7 @@ from .rag import (
     assignments_to_docs,
     build_rag_response,
     calendar_events_to_docs,
+    categories_to_docs,
     course_contents_to_docs,
     courses_to_docs,
     discussions_to_docs,
@@ -319,6 +320,74 @@ async def moodle_get_user_courses(params: GetUserCoursesInput) -> str:
             {"userid": params.user_id},
         )
         return as_response(data or [], params.response_format, _render_user_courses_md)
+    except Exception as e:
+        return format_error(e)
+
+
+# ===========================================================================
+# CATEGORIES
+# ===========================================================================
+
+
+class ListCategoriesInput(_BaseInput):
+    name_search: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Optional name match (Moodle does substring matching on name).",
+    )
+    include_subcategories: bool = Field(
+        default=True,
+        description="If true (default), also include subcategories of matched categories.",
+    )
+
+
+def _render_categories_md(categories: list[dict], pagination: dict | None) -> str:
+    if not categories:
+        return "_No categories found._"
+    lines = ["# Course categories\n"]
+    for c in categories:
+        depth = c.get("depth")
+        indent = "  " * (depth - 1) if depth and depth > 0 else ""
+        lines.append(
+            f"{indent}- **{c.get('name')}** (id={c.get('id')}, parent={c.get('parent')}, "
+            f"courses={c.get('coursecount', 0)})"
+        )
+        desc = strip_html(c.get("description", ""))
+        if desc:
+            lines.append(f"{indent}  > {truncate(desc, 200)}")
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="moodle_list_categories",
+    annotations={
+        "title": "List Moodle Course Categories",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_list_categories(params: ListCategoriesInput) -> str:
+    """List course categories, optionally filtered by name substring.
+
+    Calls `core_course_get_categories`. Use to discover category IDs and the
+    course hierarchy before filtering courses by category.
+
+    Returns:
+        Markdown tree (default), JSON, or RAG documents.
+    """
+    try:
+        api_params: dict[str, Any] = {
+            "addsubcategories": 1 if params.include_subcategories else 0,
+        }
+        if params.name_search:
+            api_params["criteria"] = [{"key": "name", "value": params.name_search}]
+        data = await _get_client().call("core_course_get_categories", api_params)
+        categories: list[dict] = data or []
+        if params.response_format == ResponseFormat.RAG:
+            return build_rag_response(categories_to_docs(categories, _site_host()))
+        return as_response(categories, params.response_format, _render_categories_md)
     except Exception as e:
         return format_error(e)
 
