@@ -393,6 +393,73 @@ async def moodle_get_users_by_field(params: SearchUsersInput) -> str:
         return format_error(e)
 
 
+_USER_CRITERIA_KEYS = {"id", "username", "email", "firstname", "lastname", "idnumber"}
+
+
+class UserCriterion(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    key: str = Field(..., description="One of: id, username, email, firstname, lastname, idnumber.")
+    value: str = Field(..., min_length=1, description="Value to match for this key.")
+
+
+class SearchUsersByCriteriaInput(_PaginatedInput):
+    criteria: list[UserCriterion] = Field(
+        ...,
+        description=(
+            "List of {key, value} filters. Allowed keys: id, username, email, "
+            "firstname, lastname, idnumber. Multiple criteria are ANDed."
+        ),
+        min_length=1,
+        max_length=20,
+    )
+
+
+@mcp.tool(
+    name="moodle_search_users",
+    annotations={
+        "title": "Search Users by Multiple Criteria",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_search_users(params: SearchUsersByCriteriaInput) -> str:
+    """Search for users using one or more criteria (ANDed together).
+
+    Calls `core_user_get_users`. Unlike `moodle_get_users_by_field` (single field,
+    multiple values), this matches across multiple fields simultaneously — e.g.
+    firstname=Anna AND lastname=Rossi. Wildcards (`%`) are allowed in values per
+    Moodle convention.
+
+    Returns:
+        Markdown list (default) or JSON with each user's id, names, email.
+        Refuses 'rag' format (PII).
+    """
+    if params.response_format == ResponseFormat.RAG:
+        return (
+            "Error: 'rag' format is not applicable to user records (PII). "
+            "Use 'json' to resolve users to IDs, then index content tools "
+            "in 'rag' mode."
+        )
+    bad = [c.key for c in params.criteria if c.key not in _USER_CRITERIA_KEYS]
+    if bad:
+        return (
+            f"Invalid criteria key(s): {', '.join(bad)}. "
+            f"Allowed: {', '.join(sorted(_USER_CRITERIA_KEYS))}."
+        )
+    try:
+        data = await _get_client().call(
+            "core_user_get_users",
+            {"criteria": [{"key": c.key, "value": c.value} for c in params.criteria]},
+        )
+        users: list[dict] = data.get("users", []) if isinstance(data, dict) else []
+        page, pag = paginate(users, params.offset, params.limit)
+        return as_response(page, params.response_format, _render_users_md, pag)
+    except Exception as e:
+        return format_error(e)
+
+
 class GetEnrolledUsersInput(_PaginatedInput):
     course_id: int = Field(..., ge=1, description="Course ID.")
 

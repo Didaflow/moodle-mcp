@@ -37,6 +37,7 @@ from moodle_mcp.server import (
     GetForumDiscussionsInput,
     ListAssignmentsInput,
     ListCoursesInput,
+    SearchUsersByCriteriaInput,
     SearchUsersInput,
     moodle_get_course_contents,
     moodle_get_discussion_posts,
@@ -44,6 +45,7 @@ from moodle_mcp.server import (
     moodle_get_assignments,
     moodle_get_users_by_field,
     moodle_list_courses,
+    moodle_search_users,
 )
 
 
@@ -415,6 +417,38 @@ class TestToolErrorPropagation:
         assert "PII" in out
 
 
+@pytest.mark.asyncio
+class TestSearchUsers:
+    async def test_calls_get_users_with_criteria(self, fake_client):
+        fake_client.response = {"users": [
+            {"id": 7, "fullname": "Anna Rossi", "username": "arossi",
+             "email": "a@b.it"},
+        ]}
+        await moodle_search_users(SearchUsersByCriteriaInput(criteria=[
+            {"key": "firstname", "value": "Anna"},
+            {"key": "lastname", "value": "Rossi"},
+        ]))
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "core_user_get_users"
+        assert params["criteria"][0] == {"key": "firstname", "value": "Anna"}
+        assert params["criteria"][1] == {"key": "lastname", "value": "Rossi"}
+
+    async def test_rejects_unknown_key(self, fake_client):
+        out = await moodle_search_users(SearchUsersByCriteriaInput(criteria=[
+            {"key": "phone", "value": "x"},
+        ]))
+        assert "Invalid criteria key" in out
+        assert "phone" in out
+        assert fake_client.calls == []  # never reached Moodle
+
+    async def test_refuses_rag(self, fake_client):
+        out = await moodle_search_users(SearchUsersByCriteriaInput(
+            criteria=[{"key": "email", "value": "a@b.it"}],
+            response_format=ResponseFormat.RAG,
+        ))
+        assert "PII" in out
+
+
 # ---------------------------------------------------------------------------
 # Tool registry — make sure all tools register
 # ---------------------------------------------------------------------------
@@ -429,6 +463,7 @@ async def test_all_tools_registered():
         "moodle_get_course_contents",
         "moodle_get_user_courses",
         "moodle_get_users_by_field",
+        "moodle_search_users",
         "moodle_get_enrolled_users",
         "moodle_get_assignments",
         "moodle_get_submissions",
