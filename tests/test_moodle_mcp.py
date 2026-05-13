@@ -27,6 +27,8 @@ from moodle_mcp.formatting import ResponseFormat, strip_html
 from moodle_mcp.rag import (
     assignments_to_docs,
     categories_to_docs,
+    chat_messages_to_docs,
+    chats_to_docs,
     courses_to_docs,
     discussions_to_docs,
     files_to_docs,
@@ -35,6 +37,9 @@ from moodle_mcp.rag import (
 )
 from moodle_mcp.server import (
     FetchFileBytesInput,
+    GetChatSessionMessagesInput,
+    GetChatSessionsInput,
+    GetChatsInput,
     GetCourseContentsInput,
     GetDiscussionPostsInput,
     GetForumDiscussionsInput,
@@ -45,6 +50,9 @@ from moodle_mcp.server import (
     SearchUsersByCriteriaInput,
     SearchUsersInput,
     moodle_fetch_file_bytes,
+    moodle_get_chat_session_messages,
+    moodle_get_chat_sessions,
+    moodle_get_chats,
     moodle_get_course_contents,
     moodle_get_discussion_posts,
     moodle_get_forum_discussions,
@@ -193,6 +201,30 @@ class TestRagConverters:
         assert docs[0]["id"] == "moodle://host/assignment/100"
         assert docs[0]["metadata"]["course_id"] == 42
         assert docs[0]["metadata"]["due_date"] is not None  # converted to ISO
+
+    def test_chats_to_docs(self):
+        docs = chats_to_docs(
+            [{"id": 5, "course": 42, "name": "Q&A", "intro": "<p>hi</p>",
+              "coursemodule": 100, "chattime": 1700000000}],
+            "host",
+        )
+        assert docs[0]["type"] == "chat"
+        assert docs[0]["content"] == "hi"
+        assert docs[0]["metadata"]["chat_id"] == 5
+        assert docs[0]["metadata"]["course_id"] == 42
+
+    def test_chat_messages_to_docs(self):
+        docs = chat_messages_to_docs(
+            [{"id": 11, "userid": 7, "system": False,
+              "message": "<b>hi</b>", "timestamp": 1700000010}],
+            chat_id=5, session_start=1700000000, host="host",
+        )
+        assert docs[0]["type"] == "chat_message"
+        assert docs[0]["content"] == "hi"
+        assert docs[0]["metadata"]["chat_id"] == 5
+        assert docs[0]["metadata"]["user_id"] == 7
+        # session_start should be ISO-converted
+        assert docs[0]["metadata"]["session_start"] is not None
 
     def test_categories_to_docs_strips_html(self):
         docs = categories_to_docs(
@@ -452,6 +484,73 @@ class TestToolErrorPropagation:
 
 
 @pytest.mark.asyncio
+class TestChats:
+    async def test_get_chats_calls_chats_by_courses(self, fake_client):
+        fake_client.response = {"chats": [
+            {"id": 5, "course": 42, "name": "Q&A", "intro": "<p>hello</p>",
+             "coursemodule": 100, "chattime": 1700000000, "schedule": 0},
+        ]}
+        await moodle_get_chats(GetChatsInput(course_ids=[42]))
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "mod_chat_get_chats_by_courses"
+        assert params["courseids"] == [42]
+
+    async def test_get_chats_rag(self, fake_client):
+        fake_client.response = {"chats": [
+            {"id": 5, "course": 42, "name": "Q&A", "intro": "<p>hi</p>",
+             "coursemodule": 100},
+        ]}
+        out = await moodle_get_chats(GetChatsInput(
+            course_ids=[42], response_format=ResponseFormat.RAG,
+        ))
+        parsed = json.loads(out)
+        assert parsed["count"] == 1
+        assert parsed["documents"][0]["type"] == "chat"
+        assert parsed["documents"][0]["content"] == "hi"
+        assert parsed["documents"][0]["metadata"]["chat_id"] == 5
+
+    async def test_get_chat_sessions_passes_showall(self, fake_client):
+        fake_client.response = {"sessions": [
+            {"sessionstart": 1, "sessionend": 100, "sessionusers": []},
+        ]}
+        await moodle_get_chat_sessions(GetChatSessionsInput(
+            chat_id=5, group_id=0, show_all=False,
+        ))
+        _, params = fake_client.calls[-1]
+        assert params["chatid"] == 5
+        assert params["groupid"] == 0
+        assert params["showall"] == 0
+
+    async def test_get_chat_sessions_refuses_rag(self, fake_client):
+        out = await moodle_get_chat_sessions(GetChatSessionsInput(
+            chat_id=5, response_format=ResponseFormat.RAG,
+        ))
+        assert "rag" in out.lower()
+        assert fake_client.calls == []
+
+    async def test_get_chat_session_messages_rag(self, fake_client):
+        fake_client.response = {"messages": [
+            {"id": 11, "chatid": 5, "userid": 7, "system": False,
+             "message": "<p>hi</p>", "timestamp": 1700000010},
+            {"id": 12, "chatid": 5, "userid": 8, "system": False,
+             "message": "hello", "timestamp": 1700000020},
+        ]}
+        out = await moodle_get_chat_session_messages(GetChatSessionMessagesInput(
+            chat_id=5, session_start=1700000000, session_end=1700000100,
+            response_format=ResponseFormat.RAG,
+        ))
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "mod_chat_get_session_messages"
+        assert params["sessionstart"] == 1700000000
+        assert params["sessionend"] == 1700000100
+        parsed = json.loads(out)
+        assert parsed["count"] == 2
+        assert parsed["documents"][0]["type"] == "chat_message"
+        assert parsed["documents"][0]["content"] == "hi"  # HTML stripped
+        assert parsed["documents"][0]["metadata"]["chat_id"] == 5
+
+
+@pytest.mark.asyncio
 class TestCategories:
     async def test_no_name_search_passes_only_addsubcategories(self, fake_client):
         fake_client.response = [
@@ -675,8 +774,13 @@ async def test_all_tools_registered():
         "moodle_list_files",
         "moodle_fetch_file_bytes",
         "moodle_list_categories",
+        "moodle_get_chats",
+        "moodle_get_chat_sessions",
+        "moodle_get_chat_session_messages",
     }
     assert expected.issubset(names)
+    # BBS gap target: exactly 19 tools total
+    assert len(names) == 19, f"expected 19 tools, got {len(names)}: {sorted(names)}"
 
 
 @pytest.mark.asyncio

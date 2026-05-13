@@ -39,6 +39,8 @@ from .rag import (
     build_rag_response,
     calendar_events_to_docs,
     categories_to_docs,
+    chat_messages_to_docs,
+    chats_to_docs,
     course_contents_to_docs,
     courses_to_docs,
     discussions_to_docs,
@@ -972,6 +974,187 @@ async def moodle_get_discussion_posts(params: GetDiscussionPostsInput) -> str:
                 posts_to_docs(posts, params.discussion_id, _site_host())
             )
         return as_response(posts, params.response_format, _render_posts_md)
+    except Exception as e:
+        return format_error(e)
+
+
+# ===========================================================================
+# CHAT
+# ===========================================================================
+
+
+class GetChatsInput(_BaseInput):
+    course_ids: list[int] = Field(
+        ...,
+        description="One or more course IDs to fetch chat activities for.",
+        min_length=1,
+        max_length=50,
+    )
+
+
+def _render_chats_md(chats: list[dict], pagination: dict | None) -> str:
+    if not chats:
+        return "_No chats found._"
+    lines = ["# Chats\n"]
+    for c in chats:
+        lines.append(
+            f"- **{c.get('name')}** (id={c.get('id')}, course={c.get('course')})"
+        )
+        intro = strip_html(c.get("intro", ""))
+        if intro:
+            lines.append(f"  > {truncate(intro, 200)}")
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="moodle_get_chats",
+    annotations={
+        "title": "List Chat Activities in Courses",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_get_chats(params: GetChatsInput) -> str:
+    """List chat activities across one or more courses.
+
+    Calls `mod_chat_get_chats_by_courses`. Use the returned `id` with
+    `moodle_get_chat_sessions` to enumerate past sessions, then
+    `moodle_get_chat_session_messages` to read the transcript.
+
+    Returns:
+        Markdown list (default), JSON, or RAG documents.
+    """
+    try:
+        data = await _get_client().call(
+            "mod_chat_get_chats_by_courses",
+            {"courseids": params.course_ids},
+        )
+        chats = data.get("chats", []) if isinstance(data, dict) else []
+        if params.response_format == ResponseFormat.RAG:
+            return build_rag_response(chats_to_docs(chats, _site_host()))
+        return as_response(chats, params.response_format, _render_chats_md)
+    except Exception as e:
+        return format_error(e)
+
+
+class GetChatSessionsInput(_BaseInput):
+    chat_id: int = Field(..., ge=1, description="Chat activity ID.")
+    group_id: int = Field(default=0, ge=0, description="Group ID, or 0 for all groups (default).")
+    show_all: bool = Field(default=True, description="Include incomplete sessions (default True).")
+
+
+def _render_chat_sessions_md(sessions: list[dict], pagination: dict | None) -> str:
+    if not sessions:
+        return "_No chat sessions._"
+    lines = ["# Chat sessions\n"]
+    for s in sessions:
+        lines.append(
+            f"- session {fmt_timestamp(s.get('sessionstart'))} → "
+            f"{fmt_timestamp(s.get('sessionend'))} "
+            f"• users: {len(s.get('sessionusers', []) or [])}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="moodle_get_chat_sessions",
+    annotations={
+        "title": "List Chat Sessions",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_get_chat_sessions(params: GetChatSessionsInput) -> str:
+    """List sessions (time-bounded conversations) for a chat activity.
+
+    Calls `mod_chat_get_sessions`. Sessions are time ranges with their
+    participating users — use `sessionstart`/`sessionend` with
+    `moodle_get_chat_session_messages` to read the messages within.
+    Refuses 'rag' format (sessions are ranges, not content).
+
+    Returns:
+        Markdown list (default) or JSON.
+    """
+    if params.response_format == ResponseFormat.RAG:
+        return (
+            "Error: 'rag' format is not applicable to chat sessions (time ranges, "
+            "not content). Use moodle_get_chat_session_messages in 'rag' mode "
+            "to index the actual messages."
+        )
+    try:
+        data = await _get_client().call(
+            "mod_chat_get_sessions",
+            {
+                "chatid": params.chat_id,
+                "groupid": params.group_id,
+                "showall": 1 if params.show_all else 0,
+            },
+        )
+        sessions = data.get("sessions", []) if isinstance(data, dict) else []
+        return as_response(sessions, params.response_format, _render_chat_sessions_md)
+    except Exception as e:
+        return format_error(e)
+
+
+class GetChatSessionMessagesInput(_BaseInput):
+    chat_id: int = Field(..., ge=1, description="Chat activity ID.")
+    session_start: int = Field(..., ge=0, description="Session start Unix timestamp (seconds).")
+    session_end: int = Field(..., ge=0, description="Session end Unix timestamp (seconds).")
+    group_id: int = Field(default=0, ge=0, description="Group ID, or 0 for all (default).")
+
+
+def _render_chat_messages_md(messages: list[dict], pagination: dict | None) -> str:
+    if not messages:
+        return "_No messages._"
+    lines = ["# Chat messages\n"]
+    for m in messages:
+        lines.append(
+            f"- {fmt_timestamp(m.get('timestamp'))} user={m.get('userid')}: "
+            f"{truncate(strip_html(m.get('message', '')), 300)}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="moodle_get_chat_session_messages",
+    annotations={
+        "title": "Get Messages from a Chat Session",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_get_chat_session_messages(params: GetChatSessionMessagesInput) -> str:
+    """Get all messages exchanged within a chat session's time window.
+
+    Calls `mod_chat_get_session_messages`. Use the timestamps from
+    `moodle_get_chat_sessions` as session_start/session_end. In RAG mode
+    emits one document per message with session_start in metadata.
+
+    Returns:
+        Markdown transcript (default), JSON, or RAG documents.
+    """
+    try:
+        data = await _get_client().call(
+            "mod_chat_get_session_messages",
+            {
+                "chatid": params.chat_id,
+                "sessionstart": params.session_start,
+                "sessionend": params.session_end,
+                "groupid": params.group_id,
+            },
+        )
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        if params.response_format == ResponseFormat.RAG:
+            return build_rag_response(chat_messages_to_docs(
+                messages, params.chat_id, params.session_start, _site_host()
+            ))
+        return as_response(messages, params.response_format, _render_chat_messages_md)
     except Exception as e:
         return format_error(e)
 

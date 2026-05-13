@@ -363,6 +363,56 @@ def files_to_docs(files: list[dict], host: str) -> list[Document]:
     return docs
 
 
+def chats_to_docs(chats: list[dict], host: str) -> list[Document]:
+    docs: list[Document] = []
+    for c in chats:
+        cid = c.get("id")
+        if not cid:
+            continue
+        docs.append({
+            "id": make_doc_id(host, "chat", cid),
+            "type": "chat",
+            "title": c.get("name") or f"Chat {cid}",
+            "content": strip_html(c.get("intro", "")),
+            "metadata": {
+                "chat_id": cid,
+                "course_id": c.get("course"),
+                "course_module_id": c.get("coursemodule"),
+                "chat_time": _iso(c.get("chattime")),
+                "schedule": c.get("schedule"),
+            },
+        })
+    return docs
+
+
+def chat_messages_to_docs(
+    messages: list[dict],
+    chat_id: int,
+    session_start: int,
+    host: str,
+) -> list[Document]:
+    docs: list[Document] = []
+    for m in messages:
+        mid = m.get("id")
+        if not mid:
+            continue
+        docs.append({
+            "id": make_doc_id(host, "chat_message", mid),
+            "type": "chat_message",
+            "title": f"Chat message {mid}",
+            "content": strip_html(m.get("message", "")),
+            "metadata": {
+                "message_id": mid,
+                "chat_id": chat_id,
+                "session_start": _iso(session_start),
+                "user_id": m.get("userid"),
+                "is_system": bool(m.get("system", False)),
+                "created_at": _iso(m.get("timestamp")),
+            },
+        })
+    return docs
+
+
 def calendar_events_to_docs(events: list[dict], host: str) -> list[Document]:
     docs: list[Document] = []
     for e in events:
