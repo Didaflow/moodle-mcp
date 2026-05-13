@@ -1,0 +1,25 @@
+[Unit]
+Description=Qdrant vector database
+Documentation=https://qdrant.tech/documentation/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qdrant
+Group=qdrant
+WorkingDirectory=/var/lib/qdrant
+ExecStart=/usr/local/bin/qdrant --config-path /etc/qdrant/config.yaml
+EnvironmentFile=/etc/qdrant/qdrant.env
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/qdrant
+
+[Install]
+WantedBy=multi-user.target

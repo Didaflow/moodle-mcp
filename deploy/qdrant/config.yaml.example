@@ -1,0 +1,13 @@
+service:
+  host: 127.0.0.1
+  http_port: 6333
+  grpc_port: 6334
+  enable_cors: false
+storage:
+  storage_path: /var/lib/qdrant/storage
+  snapshots_path: /var/lib/qdrant/snapshots
+  on_disk_payload: true
+log_level: INFO
+# Note: API key is NOT in this file. It lives in /etc/qdrant/qdrant.env
+# as QDRANT__SERVICE__API_KEY=… so the secret stays in a mode 600 env file
+# read by systemd, not a world-readable config.
