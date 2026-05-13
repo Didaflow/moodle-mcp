@@ -344,6 +344,28 @@ class TestErrorHandling:
         msg = format_error(MoodleAPIError("webservice_function_not_found_in_service", "x"))
         assert "external service" in msg.lower()
 
+    def test_couldnotauthenticate_has_hint(self):
+        msg = format_error(MoodleAPIError("couldnotauthenticate", "x"))
+        assert "token" in msg.lower()
+        assert "service" in msg.lower()
+        assert "disabled" in msg.lower()
+
+    def test_nopermissions_distinct_from_accessexception(self):
+        nop = format_error(MoodleAPIError("nopermissions", "x"))
+        acc = format_error(MoodleAPIError("accessexception", "x"))
+        assert "capability" in nop.lower() or "role" in nop.lower()
+        assert "authorized users" in acc.lower()
+        assert nop != acc
+
+    def test_servicerequireslogin_has_hint(self):
+        msg = format_error(MoodleAPIError("servicerequireslogin", "x"))
+        assert "function" in msg.lower()
+        assert "service" in msg.lower()
+
+    def test_invalidparameter_has_hint(self):
+        msg = format_error(MoodleAPIError("invalidparameter", "x"))
+        assert "param" in msg.lower() or "type" in msg.lower()
+
     def test_unknown_code_still_surfaces(self):
         msg = format_error(MoodleAPIError("totally_new_code", "bad thing"))
         assert "totally_new_code" in msg

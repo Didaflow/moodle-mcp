@@ -131,14 +131,40 @@ def format_error(e: Exception) -> str:
     """Translate exceptions into actionable error strings for the LLM."""
     if isinstance(e, MoodleAPIError):
         hints = {
-            "invalidtoken": "The MOODLE_TOKEN is invalid or expired. Regenerate it from /user/managetoken.php.",
-            "accessexception": "Permission denied. The token's user lacks capability to call this function, or the function is not enabled in the external service.",
+            "invalidtoken": (
+                "The MOODLE_TOKEN is wrong or has expired. "
+                "Regenerate it from /user/managetoken.php and update MOODLE_TOKEN."
+            ),
+            "couldnotauthenticate": (
+                "Could not authenticate: the token is invalid OR the external service "
+                "is disabled. Verify the token and ask a Moodle admin to confirm the "
+                "Web Services service is enabled in Site administration > Server > Web services."
+            ),
+            "accessexception": (
+                "Access denied: the token's user is not in the authorized users of the "
+                "external service. Ask a Moodle admin to add the user to the service's "
+                "authorized users list."
+            ),
+            "nopermissions": (
+                "No permission: the token's user lacks the role-level capability required "
+                "by this function. This is a role/capability issue (different from "
+                "accessexception, which is a service-membership issue). Ask a Moodle admin "
+                "to grant the required capability to the user's role."
+            ),
+            "servicerequireslogin": (
+                "This Web Services function is not added to the external service the "
+                "token belongs to. Ask a Moodle admin to add it in Site administration > "
+                "Server > Web services > External services > Functions."
+            ),
             "webservice_function_not_found_in_service": (
                 "This Web Services function is not enabled for the token's external service. "
                 "Ask a Moodle admin to add it to the service in Site administration > Server > Web services."
             ),
             "invalidrecord": "Resource not found. Check the ID is correct.",
-            "invalidparameter": "One or more parameters were invalid. Check types and required fields.",
+            "invalidparameter": (
+                "One or more parameters were invalid: wrong param name, wrong type, or "
+                "missing required field. Check the function's expected signature."
+            ),
         }
         hint = hints.get(e.errorcode, "")
         return f"Moodle API error [{e.errorcode}]: {e.message}" + (f" — {hint}" if hint else "")
