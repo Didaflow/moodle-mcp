@@ -6,20 +6,27 @@ Built for the `claude-opus-4-7` family and any MCP-compatible client. Python / F
 
 ## What it does
 
-12 read-only tools across 5 Moodle domains:
+19 read-only tools across 7 Moodle domains:
 
 | Domain | Tool | Moodle WS function |
 |---|---|---|
-| **Courses** | `moodle_list_courses` | `core_course_get_courses` |
+| **Courses** | `moodle_list_courses` | `core_course_get_courses` / `core_course_search_courses` |
 | | `moodle_get_course_contents` | `core_course_get_contents` |
 | | `moodle_get_user_courses` | `core_enrol_get_users_courses` |
+| **Categories** | `moodle_list_categories` | `core_course_get_categories` |
 | **Users** | `moodle_get_users_by_field` | `core_user_get_users_by_field` |
+| | `moodle_search_users` | `core_user_get_users` |
 | | `moodle_get_enrolled_users` | `core_enrol_get_enrolled_users` |
 | **Assignments** | `moodle_get_assignments` | `mod_assign_get_assignments` |
 | | `moodle_get_submissions` | `mod_assign_get_submissions` |
 | **Forums** | `moodle_get_forums` | `mod_forum_get_forums_by_courses` |
 | | `moodle_get_forum_discussions` | `mod_forum_get_forum_discussions` |
 | | `moodle_get_discussion_posts` | `mod_forum_get_discussion_posts` |
+| **Chat** | `moodle_get_chats` | `mod_chat_get_chats_by_courses` |
+| | `moodle_get_chat_sessions` | `mod_chat_get_sessions` |
+| | `moodle_get_chat_session_messages` | `mod_chat_get_session_messages` |
+| **Files** | `moodle_list_files` | `core_files_get_files` |
+| | `moodle_fetch_file_bytes` | `pluginfile.php` (binary download) |
 | **Calendar** | `moodle_get_calendar_events` | `core_calendar_get_calendar_events` |
 | | `moodle_get_upcoming_events` | `core_calendar_get_action_events_by_timesort` |
 
@@ -30,6 +37,16 @@ Every tool supports three output modes:
 - `response_format="rag"` — uniform `Document[]` shape with stable URIs, plain-text content, and rich metadata, ready for vector store ingestion.
 
 HTML in Moodle text fields (course summaries, forum posts, assignment instructions) is stripped to plain text in markdown and rag modes; preserved as-is in raw json mode.
+
+### BBS / Moodle 3.4 compliance
+
+This server is aligned with the **Bologna Business School (Università di Bologna) Moodle 3.4 Web Services developer guide**. The 19 tools cover every read-only function enumerated in the BBS guide:
+
+- All six documented error codes — `invalidtoken`, `couldnotauthenticate`, `accessexception`, `nopermissions`, `servicerequireslogin`, `invalidparameter` — are mapped to distinct, actionable hints (see `client.format_error`).
+- File downloads use the BBS-specified `pluginfile.php` endpoint with the WS token, and are SSRF-guarded against URLs outside the configured Moodle host.
+- Array parameters are PHP-form encoded (`options[ids][0]=1`) per the guide.
+
+Source: BBS internal developer guide for the read-only Moodle 3.4 instance.
 
 ### The RAG document shape
 
@@ -67,7 +84,7 @@ Key properties:
 - **Plain-text `content`**: HTML stripped, ready for embedding.
 - **`metadata`** holds everything a retrieval filter typically needs: course/forum/discussion IDs, author, timestamps in ISO 8601 UTC, URLs.
 
-Document types produced: `course`, `section`, `module`, `assignment`, `submission`, `forum`, `forum_post`, `calendar_event`.
+Document types produced: `course`, `category`, `section`, `module`, `assignment`, `submission`, `forum`, `forum_post`, `chat`, `chat_message`, `file`, `calendar_event`.
 
 ### Incremental sync
 
@@ -93,7 +110,7 @@ A Moodle admin must:
 1. **Enable Web Services**: Site administration → Advanced features → Enable web services
 2. **Enable the REST protocol**: Site administration → Server → Web services → Manage protocols
 3. **Create (or use) an external service**: Site administration → Server → Web services → External services
-4. **Add the 12 functions above** to that service
+4. **Add the Web Services functions above** to that service (19 in total across the seven domains)
 5. **Create a token** for a service user: Site administration → Server → Web services → Manage tokens, OR generate from `/user/managetoken.php`
 
 The token's user must have the relevant capabilities in any course you want to query. For full-site read access, a manager-role user is typical.
@@ -181,7 +198,6 @@ Not yet implemented but on the natural roadmap for an educational-RAG MCP:
 - `mod_quiz_*` — quiz definitions and attempts
 - `gradereport_user_get_grade_items` — grade book extraction
 - `core_completion_*` — activity completion tracking (key for dropout-risk signals)
-- File-content fetching for `resource` modules (currently you get the URL, not the bytes)
 - Logs / analytics for participation signals
 
 PRs welcome.
