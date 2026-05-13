@@ -186,6 +186,23 @@ Not yet implemented but on the natural roadmap for an educational-RAG MCP:
 
 PRs welcome.
 
+## Development
+
+```bash
+# Clone and install with test dependencies
+git clone https://github.com/didaflow/moodle-mcp.git
+cd moodle-mcp
+pip install -e ".[test]"
+
+# Run tests (all mocked, no live Moodle needed)
+pytest -v
+
+# Quick syntax check
+python -m compileall -q src/
+```
+
+CI runs on every push/PR against Python 3.10, 3.11, 3.12 and builds a wheel artifact.
+
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
