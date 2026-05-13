@@ -4,7 +4,7 @@ All notable changes to `moodle-mcp` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-05-13
 
 Aligned with the **Bologna Business School (Università di Bologna) Moodle 3.4
 Web Services developer guide**. Tool surface grows from 12 to 19; two new

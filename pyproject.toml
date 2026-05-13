@@ -1,6 +1,6 @@
 [project]
 name = "moodle-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for read-only extraction of Moodle LMS data (courses, users, assignments, forums, calendar) for LLM context and RAG pipelines."
 readme = "README.md"
 requires-python = ">=3.10"
