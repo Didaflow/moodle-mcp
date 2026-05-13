@@ -219,6 +219,31 @@ python -m compileall -q src/
 
 CI runs on every push/PR against Python 3.10, 3.11, 3.12 and builds a wheel artifact.
 
+## RAG ingestion (`moodle-ingest`)
+
+The package ships a companion CLI that walks a Moodle instance and upserts every entity into a [Qdrant](https://qdrant.tech/) vector store, embedded with **OpenAI `text-embedding-3-small`** (1536-dim).
+
+```bash
+# One-time: copy .env.example to .env and fill in
+cp .env.example .env  # then edit MOODLE_URL, MOODLE_TOKEN, QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
+
+# Dry run first (no Qdrant writes, no Qdrant env vars required)
+moodle-ingest --tenant bbs --dry-run --limit 5
+
+# Real run, one tenant at a time
+moodle-ingest --tenant bbs
+
+# Incremental re-sync — only fetch entities modified in the last 24h
+moodle-ingest --tenant bbs --since $(date -d '24 hours ago' +%s)
+
+# Restrict to specific domains
+moodle-ingest --tenant bbs --only forums,discussions,posts
+```
+
+Idempotency: each document's Qdrant point ID is `uuid5(URL_NAMESPACE, "moodle://{host}/{type}/{id}")` — deterministic, so re-runs upsert in place. No duplicates.
+
+Deploy reference for the Qdrant side (systemd unit + config template + install runbook): see `deploy/qdrant/README.md`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

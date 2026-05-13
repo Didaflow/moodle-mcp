@@ -4,6 +4,29 @@ All notable changes to `moodle-mcp` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`moodle-ingest` console entrypoint** — walks Moodle in `rag` mode,
+  embeds every entity with OpenAI `text-embedding-3-small` (1536-dim),
+  upserts into a per-tenant Qdrant collection. Idempotent: doc UUIDs are
+  `uuid5(URL_NAMESPACE, "moodle://…")` so re-runs replace points in place.
+  CLI flags: `--tenant`, `--since`, `--dry-run`, `--limit`, `--only`,
+  `--state-dir`. Reads `MOODLE_URL`, `MOODLE_TOKEN`, `QDRANT_URL`,
+  `QDRANT_API_KEY`, `OPENAI_API_KEY` from env (also loads `.env` via
+  python-dotenv if present).
+- **`deploy/qdrant/`** — reference systemd unit + config template +
+  install runbook for the Qdrant vector store on df VPS alpha.
+- **`.env.example`** — documents all env vars used by both the server
+  and the ingest CLI.
+- New deps: `openai>=1.40.0`, `qdrant-client>=1.12.0`, `python-dotenv>=1.0.0`.
+
+### Tests
+
+- 62 → 83 (21 new ingest tests covering walker order, idempotency,
+  --dry-run skip, --only filtering, env-var validation).
+
 ## [0.2.0] — 2026-05-13
 
 Aligned with the **Bologna Business School (Università di Bologna) Moodle 3.4
