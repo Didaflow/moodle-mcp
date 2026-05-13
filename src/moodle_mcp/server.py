@@ -41,6 +41,7 @@ from .rag import (
     course_contents_to_docs,
     courses_to_docs,
     discussions_to_docs,
+    files_to_docs,
     forums_to_docs,
     posts_to_docs,
     submissions_to_docs,
@@ -1048,6 +1049,150 @@ async def moodle_get_upcoming_events(params: GetUpcomingEventsInput) -> str:
         if params.response_format == ResponseFormat.RAG:
             return build_rag_response(calendar_events_to_docs(events, _site_host()))
         return as_response(events, params.response_format, _render_events_md)
+    except Exception as e:
+        return format_error(e)
+
+
+# ===========================================================================
+# FILES
+# ===========================================================================
+
+
+_PLUGINFILE_PATH = "/webservice/pluginfile.php/"
+_MAX_FETCH_BYTES_CAP = 100 * 1024 * 1024  # 100 MB hard cap
+
+
+class ListFilesInput(_BaseInput):
+    context_id: int = Field(..., ge=1, description="Context ID (e.g. course context).")
+    component: str = Field(..., min_length=1, description="Moodle component (e.g. 'mod_resource').")
+    filearea: str = Field(..., min_length=1, description="File area within the component (e.g. 'content').")
+    itemid: int = Field(default=0, ge=0, description="Item ID within the file area. Default 0.")
+    filepath: str = Field(default="/", description="Directory within the file area. Default '/'.")
+    filename: str = Field(default="", description="Specific filename to filter to. Default '' (all).")
+
+
+def _render_files_md(files: list[dict], pagination: dict | None) -> str:
+    if not files:
+        return "_No files found._"
+    lines = ["# Files\n"]
+    for f in files:
+        if f.get("isdir"):
+            lines.append(f"- 📁 **{f.get('filename', '?')}** (dir)")
+            continue
+        size = f.get("filesize")
+        size_str = f" • {size} bytes" if size else ""
+        mime = f.get("mimetype")
+        mime_str = f" • {mime}" if mime else ""
+        url = f.get("fileurl")
+        lines.append(f"- 📄 **{f.get('filename', '?')}**{size_str}{mime_str}")
+        if url:
+            lines.append(f"  url: `{url}`")
+        if f.get("timemodified"):
+            lines.append(f"  modified: {fmt_timestamp(f['timemodified'])}")
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="moodle_list_files",
+    annotations={
+        "title": "List Files in a Moodle File Area",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_list_files(params: ListFilesInput) -> str:
+    """List files in a Moodle file area (context + component + filearea).
+
+    Calls `core_files_get_files`. Returns file metadata including the
+    `fileurl` that can be passed to `moodle_fetch_file_bytes` to download
+    the actual content. In RAG mode emits one document per file with empty
+    `content` (download content separately) and full metadata.
+
+    Returns:
+        Markdown listing (default), JSON, or RAG documents.
+    """
+    try:
+        data = await _get_client().call(
+            "core_files_get_files",
+            {
+                "contextid": params.context_id,
+                "component": params.component,
+                "filearea": params.filearea,
+                "itemid": params.itemid,
+                "filepath": params.filepath,
+                "filename": params.filename,
+            },
+        )
+        files = data.get("files", []) if isinstance(data, dict) else []
+        if params.response_format == ResponseFormat.RAG:
+            return build_rag_response(files_to_docs(files, _site_host()))
+        return as_response(files, params.response_format, _render_files_md)
+    except Exception as e:
+        return format_error(e)
+
+
+class FetchFileBytesInput(_BaseInput):
+    file_url: str = Field(
+        ...,
+        min_length=1,
+        description="Full pluginfile.php URL from moodle_list_files. Must point at this Moodle site.",
+    )
+    max_size_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1,
+        le=_MAX_FETCH_BYTES_CAP,
+        description="Refuse to return more than this many bytes. Default 10MB, hard cap 100MB.",
+    )
+
+
+@mcp.tool(
+    name="moodle_fetch_file_bytes",
+    annotations={
+        "title": "Download File Content (base64)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def moodle_fetch_file_bytes(params: FetchFileBytesInput) -> str:
+    """Download a Moodle file's raw bytes via pluginfile.php, returned base64-encoded.
+
+    Validates that the URL belongs to this Moodle site's pluginfile.php endpoint
+    before fetching (SSRF guard). Always returns JSON regardless of
+    response_format because binary content is not markdown-renderable.
+
+    Returns:
+        JSON string: {"filename": str, "size": int, "base64": str}.
+    """
+    import base64
+    import json as _json
+    from urllib.parse import urlparse
+
+    client = _get_client()
+    expected_prefix = f"{client.base_url}{_PLUGINFILE_PATH}"
+    if not params.file_url.startswith(expected_prefix):
+        return _json.dumps({
+            "error": (
+                f"Refusing to fetch URL outside this Moodle's pluginfile.php endpoint. "
+                f"Expected prefix: {expected_prefix}"
+            ),
+        })
+    try:
+        data = await client.download_file_bytes(params.file_url)
+        if len(data) > params.max_size_bytes:
+            return _json.dumps({
+                "error": f"File too large: {len(data)} bytes exceeds max_size_bytes={params.max_size_bytes}",
+                "size": len(data),
+            })
+        filename = urlparse(params.file_url).path.rsplit("/", 1)[-1] or "file"
+        return _json.dumps({
+            "filename": filename,
+            "size": len(data),
+            "base64": base64.b64encode(data).decode("ascii"),
+        })
     except Exception as e:
         return format_error(e)
 

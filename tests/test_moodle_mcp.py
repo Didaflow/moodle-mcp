@@ -28,23 +28,28 @@ from moodle_mcp.rag import (
     assignments_to_docs,
     courses_to_docs,
     discussions_to_docs,
+    files_to_docs,
     make_doc_id,
     posts_to_docs,
 )
 from moodle_mcp.server import (
+    FetchFileBytesInput,
     GetCourseContentsInput,
     GetDiscussionPostsInput,
     GetForumDiscussionsInput,
     ListAssignmentsInput,
     ListCoursesInput,
+    ListFilesInput,
     SearchUsersByCriteriaInput,
     SearchUsersInput,
+    moodle_fetch_file_bytes,
     moodle_get_course_contents,
     moodle_get_discussion_posts,
     moodle_get_forum_discussions,
     moodle_get_assignments,
     moodle_get_users_by_field,
     moodle_list_courses,
+    moodle_list_files,
     moodle_search_users,
 )
 
@@ -185,6 +190,21 @@ class TestRagConverters:
         assert docs[0]["id"] == "moodle://host/assignment/100"
         assert docs[0]["metadata"]["course_id"] == 42
         assert docs[0]["metadata"]["due_date"] is not None  # converted to ISO
+
+    def test_files_to_docs_skips_dirs(self):
+        docs = files_to_docs(
+            [
+                {"filename": "x.pdf", "fileurl": "https://h/wsp/x.pdf",
+                 "filesize": 10, "mimetype": "application/pdf", "isdir": False,
+                 "timemodified": 1700000000},
+                {"filename": "sub", "isdir": True},
+            ],
+            "host",
+        )
+        assert len(docs) == 1
+        assert docs[0]["type"] == "file"
+        assert docs[0]["content"] == ""
+        assert docs[0]["metadata"]["filename"] == "x.pdf"
 
     def test_posts_to_docs_parent_linking(self):
         docs = posts_to_docs(
@@ -418,6 +438,131 @@ class TestToolErrorPropagation:
 
 
 @pytest.mark.asyncio
+class TestFiles:
+    async def test_list_files_calls_core_files_get_files(self, fake_client):
+        fake_client.response = {"files": [
+            {"filename": "slides.pdf", "filepath": "/", "filesize": 1234,
+             "fileurl": "https://moodle.test.it/webservice/pluginfile.php/1/x/slides.pdf",
+             "mimetype": "application/pdf", "timemodified": 1700000000,
+             "isdir": False},
+        ]}
+        out = await moodle_list_files(ListFilesInput(
+            context_id=1, component="mod_resource", filearea="content",
+        ))
+        wsfunc, params = fake_client.calls[-1]
+        assert wsfunc == "core_files_get_files"
+        assert params["contextid"] == 1
+        assert params["component"] == "mod_resource"
+        assert params["filearea"] == "content"
+        assert params["itemid"] == 0
+        assert params["filepath"] == "/"
+        assert "slides.pdf" in out
+
+    async def test_list_files_rag_emits_file_docs(self, fake_client):
+        fake_client.response = {"files": [
+            {"filename": "x.pdf", "fileurl": "https://h/webservice/pluginfile.php/1/x/x.pdf",
+             "filesize": 10, "mimetype": "application/pdf", "isdir": False,
+             "timemodified": 1700000000},
+            {"filename": "subdir", "isdir": True},
+        ]}
+        out = await moodle_list_files(ListFilesInput(
+            context_id=1, component="c", filearea="f",
+            response_format=ResponseFormat.RAG,
+        ))
+        parsed = json.loads(out)
+        assert parsed["count"] == 1  # directory filtered out
+        doc = parsed["documents"][0]
+        assert doc["type"] == "file"
+        assert doc["content"] == ""
+        assert doc["metadata"]["filename"] == "x.pdf"
+        assert doc["metadata"]["mimetype"] == "application/pdf"
+        assert doc["metadata"]["fileurl"].startswith("https://")
+
+    async def test_fetch_file_bytes_rejects_foreign_url(self, fake_client):
+        out = await moodle_fetch_file_bytes(FetchFileBytesInput(
+            file_url="https://evil.com/webservice/pluginfile.php/1/x/y.pdf",
+        ))
+        parsed = json.loads(out)
+        assert "error" in parsed
+        assert "pluginfile.php" in parsed["error"]
+        assert fake_client.calls == []  # never reached
+
+    async def test_fetch_file_bytes_oversize_refused(self, fake_client, monkeypatch):
+        async def fake_download(url):
+            return b"x" * 1000
+        monkeypatch.setattr(fake_client, "download_file_bytes", fake_download, raising=False)
+        out = await moodle_fetch_file_bytes(FetchFileBytesInput(
+            file_url="https://moodle.test.it/webservice/pluginfile.php/1/x/big.bin",
+            max_size_bytes=100,
+        ))
+        parsed = json.loads(out)
+        assert "error" in parsed
+        assert parsed["size"] == 1000
+
+    async def test_fetch_file_bytes_success(self, fake_client, monkeypatch):
+        async def fake_download(url):
+            return b"hello"
+        monkeypatch.setattr(fake_client, "download_file_bytes", fake_download, raising=False)
+        out = await moodle_fetch_file_bytes(FetchFileBytesInput(
+            file_url="https://moodle.test.it/webservice/pluginfile.php/1/x/hi.txt",
+        ))
+        parsed = json.loads(out)
+        assert parsed["filename"] == "hi.txt"
+        assert parsed["size"] == 5
+        import base64
+        assert base64.b64decode(parsed["base64"]) == b"hello"
+
+    async def test_download_file_bytes_appends_token(self, monkeypatch):
+        """Verify MoodleClient.download_file_bytes adds ?token= correctly."""
+        import httpx
+        from moodle_mcp.client import MoodleClient
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, content=b"ok")
+
+        transport = httpx.MockTransport(handler)
+
+        # Patch AsyncClient to use our mock transport
+        real_async_client = httpx.AsyncClient
+
+        def make_client(*args, **kwargs):
+            kwargs["transport"] = transport
+            return real_async_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", make_client)
+
+        client = MoodleClient(base_url="https://moodle.test.it", token="tok123")
+        data = await client.download_file_bytes(
+            "https://moodle.test.it/webservice/pluginfile.php/1/x/y.pdf"
+        )
+        assert data == b"ok"
+        assert "token=tok123" in captured["url"]
+
+    async def test_download_file_bytes_appends_with_existing_query(self, monkeypatch):
+        import httpx
+        from moodle_mcp.client import MoodleClient
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, content=b"ok")
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda *a, **k: real_async_client(*a, **{**k, "transport": transport}),
+        )
+        client = MoodleClient(base_url="https://h", token="t")
+        await client.download_file_bytes("https://h/webservice/pluginfile.php/1/x/y.pdf?foo=1")
+        assert "&token=t" in captured["url"]
+
+
+@pytest.mark.asyncio
 class TestSearchUsers:
     async def test_calls_get_users_with_criteria(self, fake_client):
         fake_client.response = {"users": [
@@ -472,6 +617,8 @@ async def test_all_tools_registered():
         "moodle_get_discussion_posts",
         "moodle_get_calendar_events",
         "moodle_get_upcoming_events",
+        "moodle_list_files",
+        "moodle_fetch_file_bytes",
     }
     assert expected.issubset(names)
 

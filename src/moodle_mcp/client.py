@@ -97,6 +97,27 @@ class MoodleClient:
             )
         return payload
 
+    async def download_file_bytes(self, file_url: str) -> bytes:
+        """Download a Moodle file via pluginfile.php with the WS token.
+
+        Appends `?token=...` (or `&token=...` if URL already has a query) and
+        follows redirects. Returns the raw response body.
+
+        Raises:
+            MoodleAPIError: on any non-2xx status, wrapping the status code.
+        """
+        sep = "&" if "?" in file_url else "?"
+        url = f"{file_url}{sep}token={self.token}"
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code >= 400:
+                raise MoodleAPIError(
+                    errorcode=f"http_{resp.status_code}",
+                    message=f"File download failed: HTTP {resp.status_code}",
+                    debuginfo=resp.text[:500],
+                )
+            return resp.content
+
 
 def _flatten_params(params: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     """Flatten nested dicts/lists into Moodle's PHP-style form keys.

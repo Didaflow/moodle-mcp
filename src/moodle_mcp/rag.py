@@ -302,6 +302,43 @@ def posts_to_docs(posts: list[dict], discussion_id: int, host: str) -> list[Docu
     return docs
 
 
+def files_to_docs(files: list[dict], host: str) -> list[Document]:
+    """One document per file. Content is empty — file bytes are fetched separately
+    via `moodle_fetch_file_bytes`. Use fileurl from metadata as the doc identifier
+    fallback when no numeric id is available."""
+    docs: list[Document] = []
+    for f in files:
+        if f.get("isdir"):
+            continue
+        url = f.get("fileurl") or ""
+        filename = f.get("filename") or ""
+        if not url and not filename:
+            continue
+        # Files don't have a single numeric id; use a stable hash of the fileurl
+        # so the same file across syncs gets the same doc id.
+        ident = url or filename
+        docs.append({
+            "id": make_doc_id(host, "file", ident),
+            "type": "file",
+            "title": filename or url,
+            "content": "",
+            "metadata": {
+                "filename": filename,
+                "filepath": f.get("filepath"),
+                "filesize": f.get("filesize"),
+                "mimetype": f.get("mimetype"),
+                "fileurl": url,
+                "component": f.get("component"),
+                "filearea": f.get("filearea"),
+                "context_id": f.get("contextid"),
+                "item_id": f.get("itemid"),
+                "modified_at": _iso(f.get("timemodified")),
+                "created_at": _iso(f.get("timecreated")),
+            },
+        })
+    return docs
+
+
 def calendar_events_to_docs(events: list[dict], host: str) -> list[Document]:
     docs: list[Document] = []
     for e in events:
